@@ -1,115 +1,157 @@
-# Local LRU
+# Java Thread-Local LRU Cache
 
-local_lru is a simple, lean, fast, thread-safe and lock-free implementation of LRU (Least Recently Used) caching in Rust. 
-Its speed and thread-safety is based on using thread-local storage rather than locking. 
-
-[![Crates.io](https://img.shields.io/crates/v/local_lru)](https://crates.io/crates/local_lru)
-[![Documentation](https://docs.rs/local_lru/badge.svg)](https://docs.rs/local_lru)
-
-Using cache based on thread-local storage is different from other caching strategies. Please read the [Quick Introduction](#quick-introduction) section to understand the differences and decide if this cache is suitable for your use case.
-
-__** Please regularly check for updates, as the API is constantly improving and fixes are being added regularly until a version will be released.**__
+`LocalLruCache` is a Java library providing a simple, thread-safe, and lock-free LRU (Least Recently Used) cache implementation. It leverages `ThreadLocal` storage to achieve high performance in concurrent applications by giving each thread its own independent cache instance, thus avoiding shared locks and contention.
 
 ## Features
 
-- Thread-safe and lock-free
-- High performance with O(1) complexity for cache operations
-- Uses thread-local storage for speed and thread-safety
-- Includes TTL (Time To Live) expiration
-- Supports adding and retrieving structs
+*   **Thread-Safe and Lock-Free:** Each thread operates on its own private cache instance. Data cached by one thread is not visible to, nor does it affect, other threads.
+*   **LRU Eviction Policy:** When a thread's cache reaches its configured capacity, the least recently used item in that specific thread's cache is evicted.
+*   **Time To Live (TTL):** Cache entries can be assigned a TTL. Expired items are automatically removed upon access (or not returned). TTL is based on the time of entry creation.
+*   **Configurable Cache Handlers:**
+    *   Cache parameters (capacity and TTL) are set using the static `LocalLruCache.initialize(int capacity, long ttlSeconds)` method.
+    *   This method returns a `LocalLruCache` instance (referred to as a "handler") configured with these parameters.
+    *   Threads using a specific handler will create their local caches with these settings upon first access (`addItem` or `getItem`).
+    *   Different handlers can be created with different configurations, allowing various parts of an application (or different threads) to use caches with distinct behaviors if needed.
 
-## Example Usage
+## Use Cases
 
-Note that `LocalCache::initialize` only initializes the _parameters_ that set the cache's capacity and ttl. It does _not_ create the cache itself.
-The cache will only be lazily created with the initalized params when a thread first accesses the cache with a call to `get_item` or `add_item`. Subsequent calls to `initialize` simply modify the cache parameters, which will only effect threads that did not previously access the cache.
+This caching strategy is beneficial for scenarios requiring high-throughput, read-heavy caching where:
+*   Inter-thread cache coherency is not a strict requirement (i.e., it's acceptable for different threads to fetch/recompute the same data initially).
+*   The memory overhead of per-thread caches is acceptable.
+It can excel in applications like web services where individual requests, often handled by different threads, can benefit from their own fast, local cache without contention.
 
-```rust
-use local_lru::LocalCache;  
-use bytes::Bytes;
-// Create a new cache with a capacity of 2 items and a TTL of 60 seconds 
-let cache = LocalCache::initialize(2, 60);
-// Modify the cache parameters for the current thread
-let cache = LocalCache::initialize(2, 0);
-// Add an item to the cache
-cache.add_item("key1", Bytes::from("value1"));
-// Get the item from the cache
-assert_eq!(cache.get_item("key1"), Some(Bytes::from("value1")));
+## Basic Usage
 
-// Add a struct to the cache
- #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
-struct TestStruct {
-    field1: String,
-    field2: i32,
-}
-let test_struct = TestStruct {
-    field1: "Hello".to_string(),
-    field2: 42,
-};
-// Add the struct to the cache
-cache.add_struct("test_key", test_struct.clone());
-// Retrieve the struct from the cache
-let ret_struct: Option<TestStruct> = cache.get_struct("test_key");
-// Assert that the retrieved struct matches the original
-assert_eq!(ret_struct, Some(test_struct.clone()));
+### Initialization
+
+To get a cache handler, use the static `initialize` method:
+
+```java
+// Get a cache handler configured for a capacity of 100 items and a TTL of 60 seconds
+LocalLruCache cacheHandler = LocalLruCache.initialize(100, 60);
+
+// Get another handler, perhaps for a different use case, with different settings
+LocalLruCache smallShortLivedCacheHandler = LocalLruCache.initialize(10, 5); // 10 items, 5s TTL
+
+// A handler for cache with infinite TTL (ttlSeconds <= 0)
+LocalLruCache infiniteTtlCacheHandler = LocalLruCache.initialize(200, 0);
+```
+The `LocalLruCache` object returned by `initialize` acts as a "handler" or "configuration snapshot". It doesn't hold the cached data itself; data is stored in the thread-local stores that are created when a thread first uses the handler.
+
+### Adding Items
+
+Use the `addItem` method on a handler instance. The item will be added to the current thread's local cache associated with that handler.
+
+```java
+// Using the first handler
+cacheHandler.addItem("myKey1", "myValue1");
+
+// Assuming MyCustomObject is a class you've defined
+// MyCustomObject customObject = new MyCustomObject("data");
+// cacheHandler.addItem("myObjectKey", customObject);
+
+byte[] fileBytes = new byte[]{0, 1, 2, 3};
+cacheHandler.addItem("myFileBytesKey", fileBytes);
 ```
 
+If an item with the same key already exists in the current thread's cache for that handler, it will be overwritten.
 
-## Quick Introduction
+### Retrieving Items
 
- One of the main challenges with LRU caching is that it invovles a lot of writes and updates of its internal data structures: each get and set operation in LRU cache requires updating of at least one pointer.
- This fact diminishes the famous O(1) complexity of LRU cache operations in multithreaded applications, such as web services, which require synchronization and locking mechanisms to ensure thread-safety and thus significantly harm performance.
+Use the `getItem` method. It retrieves from the current thread's local cache associated with the handler. You need to cast the result to the expected type.
 
- The thread-local strategy allows us to create a fast, thread-safe, and lock-free O(1) cache for the price of using more memory. As such, the cache is suitable for applications that require a high-performance and thread-safe cache, but do not require a large memory footprint.
-
-Using thread-local storage means that each thread has its own cache, and the cache is not shared between threads. This means that a cache item that is added to the cache using one thread will not be accessible to other threads. Users need to be aware of this behavior and design their usage of the cache accordingly. This can be very useful for applications that cache results of database queries, for example. If your app uses 4 threads, then it will have 4 caches stores, one per thread, and for each row you will have to access the database _at most_ 4 times, once per thread. But you will gain in performance and scalability, avoiding locks and mutexes.
-
-## Example using local_lru in an Axum service for caching
-
- ```rust
- struct CacheItem {
-    key: String,
-    value: String,
-}
-#[tokio::main]
-async fn main() {
-    let cache = Arc::new(LocalCache::initialize(100, 120));
-    let app = axum::Router::new()
-        .route("/get/:key", axum::routing::get(get_key))
-        .route("/post", axum::routing::post(post_key))
-        .with_state(cache);
-
-    let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+```java
+// Retrieve a String
+String value1 = (String) cacheHandler.getItem("myKey1");
+if (value1 != null) {
+    System.out.println("Retrieved: " + value1);
+} else {
+    System.out.println("Item not found or expired.");
 }
 
-async fn get_key(
-    State(cache): State<Arc<LocalCache>>,
-    Path(key): Path<String>,
-) -> (StatusCode, String) {
-    if let Some(content) = cache.get_item(&key) {
-        let content_str = String::from_utf8(content.to_vec()).unwrap();
-        let response_str = format!(
-            "{{ \"key\": \"{}\", \"value\": \"{}\" }}",
-            key, content_str
-        );
-        (StatusCode::OK, response_str)
-    } else {
-        (StatusCode::NOT_FOUND, "".to_string())
+// Retrieve a custom object
+// Assuming MyCustomObject is a class you've defined
+// MyCustomObject retrievedObject = (MyCustomObject) cacheHandler.getItem("myObjectKey");
+// if (retrievedObject != null) {
+//     // Use the object
+// }
+
+// Retrieve a byte array
+byte[] retrievedBytes = (byte[]) cacheHandler.getItem("myFileBytesKey");
+if (retrievedBytes != null) {
+    // Process the bytes
+}
+```
+
+If an item is not found, or if it was found but has expired based on its TTL, `getItem` will return `null`. (Expired items are also removed from the cache upon such an access).
+
+### Example: Working with Multiple Threads
+
+```java
+LocalLruCache userCacheConfig = LocalLruCache.initialize(50, 300); // 50 items, 5 mins TTL
+
+// Placeholder for a UserPreferences class, replace with your actual class
+class UserPreferences {
+    String data;
+    public UserPreferences(String data) { this.data = data; }
+    @Override public String toString() { return "UserPreferences{data='" + data + "'}"; }
+}
+
+// Placeholder for a method that would fetch data, e.g., from a database
+UserPreferences fetchUserPreferencesFromDb(String userId) {
+    System.out.println("Fetching preferences for " + userId + " from DB (simulated)");
+    return new UserPreferences("Data for " + userId);
+}
+
+// Thread 1
+new Thread(() -> {
+    String userId = "user123";
+    UserPreferences prefs = fetchUserPreferencesFromDb(userId); // some method to get data
+    if (prefs != null) {
+        userCacheConfig.addItem("prefs_" + userId, prefs);
     }
-}
- ```
+    // ... later
+    UserPreferences cachedPrefs = (UserPreferences) userCacheConfig.getItem("prefs_" + userId);
+    if (cachedPrefs != null) {
+        System.out.println("Thread 1 using cached prefs for " + userId + ": " + cachedPrefs);
+    }
+},"Thread-1-Worker").start();
 
-## Benchmarks
+// Thread 2
+new Thread(() -> {
+    try { Thread.sleep(50); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } // Stagger threads slightly for demo
+    String userId = "user456";
+     // This thread will have its own cache for userCacheConfig.
+     // It won't see "prefs_user123" unless it adds it itself.
+    UserPreferences prefsOther = (UserPreferences) userCacheConfig.getItem("prefs_" + userId);
+    if (prefsOther == null) {
+        prefsOther = fetchUserPreferencesFromDb(userId);
+        if (prefsOther != null) {
+            userCacheConfig.addItem("prefs_" + userId, prefsOther);
+            System.out.println("Thread 2 fetched and cached prefs for " + userId + ": " + prefsOther);
+        }
+    } else {
+        System.out.println("Thread 2 found cached prefs for " + userId + ": " + prefsOther);
+    }
+},"Thread-2-Worker").start();
+```
 
-Benchmarking is a very complex task and the results can be very misleading if not done carefully. Please run your own benchmarks to see if this cache is suitable for your use case.   
+In this example, each thread maintains its own cache of user preferences. An item cached by Thread 1 (e.g., for `user123`) is not accessible to Thread 2, unless Thread 2 also happens to cache an item with the exact same key.
 
-I'm adding these results just to give you an idea of the cache's performance. Its hard to find cache implementations in Rust with similar properties (thread-safe, in-memory, simple, LRU) so I cannot make a direct comparison.   
+## Building
 
-I did run some benchmarks using the [moka crate](https://crates.io/crates/moka) which is a wonderful implementation of a high-performance concurrent cache.  
+This project can be compiled as a standard Java library. No external dependencies beyond standard Java are required for the cache logic itself.
+To compile the `LocalLruCache.java` file (e.g., if it's in `src/com/example/locallru/LocalLruCache.java` from a project root):
+```sh
+javac src/com/example/locallru/LocalLruCache.java
+```
+To run the main method for demonstration (assuming you are in the project root and the file compiled to `src/com/example/locallru/LocalLruCache.class` or similar relative to a classpath root):
+```sh
+java -cp src com.example.locallru.LocalLruCache
+```
+For larger projects, using a build tool like Maven or Gradle is recommended.
 
-I created 10,000 key-value pairs, and then I measured the time it took for 10 threads to run N iterations, where each iteration consists of randomly picking a key-value pair and then either getting the value from the cache or adding the value to the cache if it doesn't exist.
-I measured 1K to 1M iterations X 10 threads and plotted the results.
+## Contributing
 
-![benchmarks](assets/bench.png)
-
-As shown in the results, Moka initially outperforms local_lru until around 250,000 iterations per thread. Beyond that point, local_lru becomes faster, and by the time iterations reach 1 million per thread (totaling 10 million), local_lru is nearly twice as fast as Moka. This suggests that avoiding locking mechanisms can significantly boost throughput in high-throughput, multi-threaded scenarios despit the use of thread-local storage which causes many cache misses. 
+Contributions are welcome! Please feel free to submit pull requests or open issues if you find any bugs or have suggestions for improvements.
+```
